@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Asteroids - V18 (Final)</title>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        body { margin: 0; background: #000; overflow: hidden; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        // --- GAME CONSTANTS ---
+        const FPS = 60;
+        const FRICTION = 0.7;
+        const GAME_LIVES = 3;
+        const SAVE_KEY_SCORE = "highscore";
+        const EXTRA_LIFE_PTS = 100000; 
+
+        // --- COLORS ---
+        const COLOR_SHIP = "#00ffff"; 
+        const COLOR_BULLET = "#ccff00"; 
+        const COLOR_TEXT = "#00ffff"; 
+        const COLOR_THRUST_CORE = "yellow";
+        const COLOR_THRUST_OUTER = "red";
+
+        const SHIP_SIZE = 30;
+        const SHIP_THRUST = 5;
+        const SHIP_EXPLODE_DUR = 0.3;
+        const SHIP_INV_DUR = 3;
+        const SHIP_BLINK_DUR = 0.1;
+
+        const LASER_MAX = 8;          
+        const LASER_SPD = 500;        
+        const LASER_COOLDOWN = 0.1;   
+
+        const ROIDS_NUM = 3;
+        const ROIDS_SIZE = 100;
+        const ROIDS_SPD = 50;
+        const ROIDS_VERT = 10;
+        const ROIDS_JAG = 0.4;
+        const ROIDS_PTS_LGE = 20;
+        const ROIDS_PTS_MED = 50;
+        const ROIDS_PTS_SML = 100;
+
+        const TEXT_FADE_TIME = 2.5;
+        const TEXT_SIZE = 20; 
+
+        // --- SOUND SYNTHESIZER ---
+        const Sound = {
+            ctx: new (window.AudioContext || window.webkitAudioContext)(),
+            thrustOsc: null,
+            thrustGain: null,
+
+            init: function() {
+                if (this.ctx.state === 'suspended') {
+                    this.ctx.resume();
+                }
+            },
+
+            shoot: function() {
+                if (automationOn) return; 
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.type = "triangle";
+                osc.frequency.setValueAtTime(440, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(110, this.ctx.currentTime + 0.1);
+                gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.1);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.1);
+            },
+
+            hit: function() {
+                if (automationOn) return;
+                this.createNoise(0.1);
+            },
+
+            explode: function() {
+                if (automationOn) return;
+                this.createNoise(0.5);
+            },
+
+            extraLife: function() {
+                if (automationOn) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.type = "sine";
+                osc.frequency.setValueAtTime(523.25, this.ctx.currentTime); 
+                osc.frequency.setValueAtTime(659.25, this.ctx.currentTime + 0.1); 
+                osc.frequency.setValueAtTime(783.99, this.ctx.currentTime + 0.2); 
+                osc.frequency.setValueAtTime(1046.50, this.ctx.currentTime + 0.3); 
+                gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
+                gain.gain.setValueAtTime(0.1, this.ctx.currentTime + 0.3);
+                gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.6);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.6);
+            },
+
+            thrust: function() {
+                if (automationOn || this.thrustOsc) return;
+                this.thrustOsc = this.ctx.createOscillator();
+                this.thrustGain = this.ctx.createGain();
+                const filter = this.ctx.createBiquadFilter();
+                filter.type = "lowpass";
+                filter.frequency.value = 100;
+                this.thrustOsc.type = "sawtooth";
+                this.thrustOsc.frequency.value = 80;
+                this.thrustOsc.connect(filter);
+                filter.connect(this.thrustGain);
+                this.thrustGain.connect(this.ctx.destination);
+                this.thrustGain.gain.setValueAtTime(0.05, this.ctx.currentTime);
+                this.thrustOsc.start();
+            },
+
+            stopThrust: function() {
+                if (this.thrustOsc) {
+                    this.thrustOsc.stop();
+                    this.thrustOsc.disconnect();
+                    this.thrustGain.disconnect();
+                    this.thrustOsc = null;
+                    this.thrustGain = null;
+                }
+            },
+
+            createNoise: function(duration) {
+                const bufferSize = this.ctx.sampleRate * duration;
+                const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+                const data = buffer.getChannelData(0);
+                for (let i = 0; i < bufferSize; i++) {
+                    data[i] = Math.random() * 2 - 1;
+                }
+                const noise = this.ctx.createBufferSource();
+                noise.buffer = buffer;
+                const gain = this.ctx.createGain();
+                const filter = this.ctx.createBiquadFilter();
+                filter.type = "lowpass";
+                filter.frequency.value = 1000;
+                noise.connect(filter);
+                filter.connect(gain);
+                gain.connect(this.ctx.destination);
+                gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + duration);
+                noise.start();
+            }
+        };
+
+        // --- VARIABLES ---
+        let level, lives, roids, score, scoreHigh, ship, text, textAlpha;
+        let scoreNextLife = EXTRA_LIFE_PTS;
+        let fx = [];
+        let bullets = [];
+        let automationOn = true; 
+        
+        let legendRoids = [];
+
+        // --- SETUP ---
+        createLegendRocks();
+        newGame();
+
+        function createLegendRocks() {
+            legendRoids.push(newAsteroid(0, 0, Math.ceil(ROIDS_SIZE / 2), "hsl(200, 50%, 50%)"));
+            legendRoids.push(newAsteroid(0, 0, Math.ceil(ROIDS_SIZE / 4), "hsl(30, 50%, 50%)"));
+            legendRoids.push(newAsteroid(0, 0, Math.ceil(ROIDS_SIZE / 8), "hsl(100, 50%, 50%)"));
+        }
+
+        // --- INPUT ---
+        document.addEventListener("keydown", keyDown);
+        document.addEventListener("keyup", keyUp);
+
+        function keyDown(ev) {
+            if (ship.dead) return;
+
+            if (automationOn) {
+                Sound.init(); 
+                automationOn = false;
+                newGame();
+                return;
+            }
+
+            switch(ev.keyCode) {
+                case 37: ship.rot = 360 / 180 * Math.PI / FPS; break; 
+                case 38: 
+                    ship.thrusting = true; 
+                    Sound.thrust(); 
+                    break; 
+                case 39: ship.rot = -360 / 180 * Math.PI / FPS; break; 
+                case 32: ship.shooting = true; shoot(); break; 
+            }
+        }
+
+        function keyUp(ev) {
+            if (ship.dead || automationOn) return;
+            switch(ev.keyCode) {
+                case 37: case 39: ship.rot = 0; break;
+                case 38: 
+                    ship.thrusting = false; 
+                    Sound.stopThrust(); 
+                    break;
+                case 32: ship.shooting = false; break; 
+            }
+        }
+
+        function newGame() {
+            lives = GAME_LIVES;
+            score = 0;
+            scoreNextLife = EXTRA_LIFE_PTS;
+            level = 0;
+            scoreHigh = 0;
+            try {
+                let scoreStr = localStorage.getItem(SAVE_KEY_SCORE);
+                if (scoreStr) scoreHigh = parseInt(scoreStr);
+            } catch (err) {}
+            ship = newShip();
+            newLevel();
+        }
+
+        function newLevel() {
+            text = "LEVEL " + (level + 1);
+            textAlpha = 1.0;
+            createAsteroidBelt();
+        }
+
+        function newShip() {
+            return {
+                x: canvas.width / 2,
+                y: canvas.height / 2,
+                r: SHIP_SIZE / 2,
+                a: 90 / 180 * Math.PI,
+                rot: 0,
+                thrusting: false,
+                thrust: { x: 0, y: 0 },
+                explodeTime: 0,
+                blinkNum: Math.ceil(SHIP_INV_DUR / SHIP_BLINK_DUR),
+                blinkTime: Math.ceil(SHIP_BLINK_DUR * FPS),
+                dead: false,
+                canShoot: true,
+                laserTimer: 0,
+                shooting: false
+            };
+        }
+
+        function createAsteroidBelt() {
+            roids = [];
+            let x, y;
+            for (let i = 0; i < ROIDS_NUM + level; i++) {
+                do {
+                    x = Math.floor(Math.random() * canvas.width);
+                    y = Math.floor(Math.random() * canvas.height);
+                } while (distBetweenPoints(ship.x, ship.y, x, y) < ROIDS_SIZE * 2 + ship.r);
+                roids.push(newAsteroid(x, y, Math.ceil(ROIDS_SIZE / 2)));
+            }
+        }
+
+        function newAsteroid(x, y, r, color = null) {
+            let lvlMult = 1 + 0.1 * level;
+            
+            if (color == null) {
+                const hue = Math.floor(Math.random() * 60) + 200; 
+                const sat = Math.floor(Math.random() * 30) + 30;  
+                const light = Math.floor(Math.random() * 40) + 40; 
+                color = `hsl(${hue}, ${sat}%, ${light}%)`;
+            }
+
+            const roid = {
+                x: x,
+                y: y,
+                xv: Math.random() * ROIDS_SPD * lvlMult / FPS * (Math.random() < 0.5 ? 1 : -1),
+                yv: Math.random() * ROIDS_SPD * lvlMult / FPS * (Math.random() < 0.5 ? 1 : -1),
+                r: r,
+                a: Math.random() * Math.PI * 2,
+                vert: Math.floor(Math.random() * (ROIDS_VERT + 1) + ROIDS_VERT / 2),
+                offs: [],
+                color: color 
+            };
+            for (let i = 0; i < roid.vert; i++) {
+                roid.offs.push(Math.random() * ROIDS_JAG * 2 + 1 - ROIDS_JAG);
+            }
+            return roid;
+        }
+
+        function destroyAsteroid(index) {
+            const x = roids[index].x;
+            const y = roids[index].y;
+            const r = roids[index].r;
+            const color = roids[index].color; 
+
+            // FX
+            createParticles(x, y, r, color);
+            Sound.hit(); 
+
+            // Scoring
+            if (r == Math.ceil(ROIDS_SIZE / 2)) {
+                roids.push(newAsteroid(x, y, Math.ceil(ROIDS_SIZE / 4), color));
+                roids.push(newAsteroid(x, y, Math.ceil(ROIDS_SIZE / 4), color));
+                score += ROIDS_PTS_LGE;
+            } else if (r == Math.ceil(ROIDS_SIZE / 4)) {
+                roids.push(newAsteroid(x, y, Math.ceil(ROIDS_SIZE / 8), color));
+                roids.push(newAsteroid(x, y, Math.ceil(ROIDS_SIZE / 8), color));
+                score += ROIDS_PTS_MED;
+            } else {
+                score += ROIDS_PTS_SML;
+            }
+
+            // EXTRA LIFE
+            if (score >= scoreNextLife) {
+                lives++;
+                scoreNextLife += EXTRA_LIFE_PTS;
+                Sound.extraLife();
+            }
+
+            // HIGH SCORE
+            if (score > scoreHigh) {
+                scoreHigh = score;
+                try { localStorage.setItem(SAVE_KEY_SCORE, scoreHigh); } catch(e) {}
+            }
+
+            roids.splice(index, 1);
+            if (roids.length == 0) {
+                level++;
+                newLevel();
+            }
+        }
+
+        function distBetweenPoints(x1, y1, x2, y2) {
+            return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+        }
+
+        function explodeShip() {
+            ship.explodeTime = Math.ceil(SHIP_EXPLODE_DUR * FPS);
+            createParticles(ship.x, ship.y, 50, COLOR_SHIP);
+            createParticles(ship.x, ship.y, 50, COLOR_THRUST_OUTER);
+            Sound.explode(); 
+            Sound.stopThrust(); 
+        }
+        
+        function createParticles(x, y, amount, color) {
+            for(let i=0; i<amount; i++) {
+                fx.push({
+                    x: x,
+                    y: y,
+                    xv: (Math.random() - 0.5) * (Math.random() * 10),
+                    yv: (Math.random() - 0.5) * (Math.random() * 10),
+                    r: Math.random() * 3,
+                    life: Math.random() * 30,
+                    color: color
+                });
+            }
+        }
+
+        function gameOver() {
+            ship.dead = true;
+            text = "GAME OVER";
+            textAlpha = 1.0;
+            Sound.stopThrust();
+        }
+
+        function shoot() {
+            if (ship.dead || ship.explodeTime > 0) return;
+            
+            if (ship.laserTimer == 0 && bullets.length < LASER_MAX) {
+                bullets.push({
+                    x: ship.x + 4/3 * ship.r * Math.cos(ship.a),
+                    y: ship.y - 4/3 * ship.r * Math.sin(ship.a),
+                    xv: LASER_SPD * Math.cos(ship.a) / FPS,
+                    yv: -LASER_SPD * Math.sin(ship.a) / FPS
+                });
+                ship.laserTimer = Math.ceil(LASER_COOLDOWN * FPS);
+                Sound.shoot(); 
+            }
+        }
+
+        // --- AI ---
+        function autoPilot() {
+            if (ship.explodeTime > 0 || ship.dead) return;
+
+            let nearest = -1;
+            let dist = Infinity;
+            let bestPredictX = 0;
+            let bestPredictY = 0;
+            let bulletSpeed = LASER_SPD / FPS; 
+
+            for (let i = 0; i < roids.length; i++) {
+                let d = distBetweenPoints(ship.x, ship.y, roids[i].x, roids[i].y);
+                let timeToHit = d / bulletSpeed; 
+                let predictX = roids[i].x + roids[i].xv * timeToHit;
+                let predictY = roids[i].y + roids[i].yv * timeToHit;
+
+                if (predictX < 0 || predictX > canvas.width || predictY < 0 || predictY > canvas.height) {
+                    continue;
+                }
+
+                if (d < dist) {
+                    dist = d;
+                    nearest = i;
+                    bestPredictX = predictX;
+                    bestPredictY = predictY;
+                }
+            }
+
+            if (nearest == -1) {
+                ship.rot = 0;
+                ship.thrusting = false;
+                return;
+            }
+
+            let angleToTarget = Math.atan2(bestPredictY - ship.y, bestPredictX - ship.x);
+            
+            if (angleToTarget < 0) angleToTarget += Math.PI * 2;
+            let shipAngle = ship.a % (Math.PI * 2);
+            if (shipAngle < 0) shipAngle += Math.PI * 2;
+
+            let left = (shipAngle - angleToTarget + Math.PI * 2) % (Math.PI * 2);
+            let right = (angleToTarget - shipAngle + Math.PI * 2) % (Math.PI * 2);
+
+            if (left < right) {
+                ship.rot = 360 / 180 * Math.PI / FPS;
+            } else {
+                ship.rot = -360 / 180 * Math.PI / FPS;
+            }
+
+            if (Math.abs(left - right) < 0.5) {
+                shoot();
+            }
+
+            ship.thrusting = (dist > canvas.width / 3);
+        }
+
+        // --- GAME LOOP ---
+        setInterval(update, 1000 / FPS);
+
+        function update() {
+            let blinkOn = ship.blinkNum % 2 == 0;
+            let exploding = ship.explodeTime > 0;
+
+            if (automationOn) autoPilot();
+            if (ship.laserTimer > 0) ship.laserTimer--;
+
+            // 1. Draw Space
+            let grd = ctx.createRadialGradient(canvas.width/2, canvas.height/2, 0, canvas.width/2, canvas.height/2, canvas.width);
+            grd.addColorStop(0, "#1a0033"); 
+            grd.addColorStop(1, "black");   
+            ctx.fillStyle = grd;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 2. Thrust Physics
+            if (ship.thrusting && !ship.dead) {
+                ship.thrust.x += SHIP_THRUST * Math.cos(ship.a) / FPS;
+                ship.thrust.y -= SHIP_THRUST * Math.sin(ship.a) / FPS;
+                
+                if (!exploding && blinkOn) {
+                    ctx.fillStyle = COLOR_THRUST_OUTER;
+                    ctx.strokeStyle = COLOR_THRUST_CORE;
+                    ctx.lineWidth = SHIP_SIZE / 10;
+                    ctx.beginPath();
+                    ctx.moveTo(
+                        ship.x - ship.r * (2/3 * Math.cos(ship.a) + 0.5 * Math.sin(ship.a)),
+                        ship.y + ship.r * (2/3 * Math.sin(ship.a) - 0.5 * Math.cos(ship.a))
+                    );
+                    ctx.lineTo(
+                        ship.x - ship.r * 6/3 * Math.cos(ship.a),
+                        ship.y + ship.r * 6/3 * Math.sin(ship.a)
+                    );
+                    ctx.lineTo(
+                        ship.x - ship.r * (2/3 * Math.cos(ship.a) - 0.5 * Math.sin(ship.a)),
+                        ship.y + ship.r * (2/3 * Math.sin(ship.a) + 0.5 * Math.cos(ship.a))
+                    );
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+                }
+            } else {
+                ship.thrust.x -= FRICTION * ship.thrust.x / FPS;
+                ship.thrust.y -= FRICTION * ship.thrust.y / FPS;
+            }
+            
+            if (!ship.dead) {
+                ship.x += ship.thrust.x;
+                ship.y += ship.thrust.y;
+                ship.a += ship.rot;
+
+                if (ship.x < 0 - ship.r) ship.x = canvas.width + ship.r;
+                else if (ship.x > canvas.width + ship.r) ship.x = 0 - ship.r;
+                if (ship.y < 0 - ship.r) ship.y = canvas.height + ship.r;
+                else if (ship.y > canvas.height + ship.r) ship.y = 0 - ship.r;
+            }
+
+            // 3. Draw Ship
+            if (!exploding) {
+                if (blinkOn && !ship.dead) {
+                    ctx.strokeStyle = COLOR_SHIP; 
+                    ctx.lineWidth = SHIP_SIZE / 20;
+                    ctx.beginPath();
+                    ctx.moveTo(
+                        ship.x + 4/3 * ship.r * Math.cos(ship.a),
+                        ship.y - 4/3 * ship.r * Math.sin(ship.a)
+                    );
+                    ctx.lineTo(
+                        ship.x - ship.r * (2/3 * Math.cos(ship.a) + Math.sin(ship.a)),
+                        ship.y + ship.r * (2/3 * Math.sin(ship.a) - Math.cos(ship.a))
+                    );
+                    ctx.lineTo(
+                        ship.x - ship.r * (2/3 * Math.cos(ship.a) - Math.sin(ship.a)),
+                        ship.y + ship.r * (2/3 * Math.sin(ship.a) + Math.cos(ship.a))
+                    );
+                    ctx.closePath();
+                    ctx.stroke();
+                }
+                if (ship.blinkNum > 0) {
+                    ship.blinkTime--;
+                    if (ship.blinkTime == 0) {
+                        ship.blinkTime = Math.ceil(SHIP_BLINK_DUR * FPS);
+                        ship.blinkNum--;
+                    }
+                }
+            } else {
+                ship.explodeTime--;
+                if (ship.explodeTime == 0) {
+                    if (automationOn) {
+                        ship = newShip();
+                    } else {
+                        lives--;
+                        if (lives == 0) gameOver();
+                        else ship = newShip();
+                    }
+                }
+            }
+
+            // 4. Draw Asteroids
+            ctx.lineWidth = SHIP_SIZE / 20;
+            for (let i = 0; i < roids.length; i++) {
+                ctx.strokeStyle = roids[i].color;
+                const a = roids[i].x;
+                const b = roids[i].y;
+                const r = roids[i].r;
+                const aAngle = roids[i].a;
+                const vert = roids[i].vert;
+                const offs = roids[i].offs;
+
+                ctx.beginPath();
+                for (let j = 0; j < vert; j++) {
+                    ctx.lineTo(
+                        a + r * offs[j] * Math.cos(aAngle + j * Math.PI * 2 / vert),
+                        b + r * offs[j] * Math.sin(aAngle + j * Math.PI * 2 / vert)
+                    );
+                }
+                ctx.closePath();
+                ctx.stroke();
+
+                roids[i].x += roids[i].xv;
+                roids[i].y += roids[i].yv;
+
+                if (roids[i].x < 0 - roids[i].r) roids[i].x = canvas.width + roids[i].r;
+                else if (roids[i].x > canvas.width + roids[i].r) roids[i].x = 0 - roids[i].r;
+                if (roids[i].y < 0 - roids[i].r) roids[i].y = canvas.height + roids[i].r;
+                else if (roids[i].y > canvas.height + roids[i].r) roids[i].y = 0 - roids[i].r;
+            }
+
+            // 5. Physics (Asteroid Collisions)
+            for (let i = 0; i < roids.length; i++) {
+                for (let j = i + 1; j < roids.length; j++) {
+                    let ax = roids[i].x, ay = roids[i].y, ar = roids[i].r;
+                    let bx = roids[j].x, by = roids[j].y, br = roids[j].r;
+                    let dist = distBetweenPoints(ax, ay, bx, by);
+
+                    if (dist < ar + br) {
+                        let overlap = (ar + br) - dist;
+                        let theta = Math.atan2(by - ay, bx - ax);
+                        if (dist === 0) theta = Math.random() * Math.PI * 2;
+                        
+                        roids[i].x -= overlap / 2 * Math.cos(theta);
+                        roids[i].y -= overlap / 2 * Math.sin(theta);
+                        roids[j].x += overlap / 2 * Math.cos(theta);
+                        roids[j].y += overlap / 2 * Math.sin(theta);
+
+                        if (dist === 0) dist = 0.1;
+                        let m1 = ar, m2 = br;
+                        let nx = (bx - ax) / dist;
+                        let ny = (by - ay) / dist;
+                        let tx = -ny;
+                        let ty = nx;
+                        
+                        let dpTan1 = roids[i].xv * tx + roids[i].yv * ty;
+                        let dpTan2 = roids[j].xv * tx + roids[j].yv * ty;
+                        let dpNorm1 = roids[i].xv * nx + roids[i].yv * ny;
+                        let dpNorm2 = roids[j].xv * nx + roids[j].yv * ny;
+                        
+                        let m1_eff = (dpNorm1 * (m1 - m2) + 2 * m2 * dpNorm2) / (m1 + m2);
+                        let m2_eff = (dpNorm2 * (m2 - m1) + 2 * m1 * dpNorm1) / (m1 + m2);
+
+                        roids[i].xv = tx * dpTan1 + nx * m1_eff;
+                        roids[i].yv = ty * dpTan1 + ny * m1_eff;
+                        roids[j].xv = tx * dpTan2 + nx * m2_eff;
+                        roids[j].yv = ty * dpTan2 + ny * m2_eff;
+                    }
+                }
+            }
+
+            // 6. Bullets
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                ctx.fillStyle = COLOR_BULLET; 
+                ctx.beginPath();
+                ctx.arc(bullets[i].x, bullets[i].y, 2, 0, Math.PI * 2, false);
+                ctx.fill();
+
+                bullets[i].x += bullets[i].xv;
+                bullets[i].y += bullets[i].yv;
+
+                if (bullets[i].x < 0 || bullets[i].x > canvas.width || bullets[i].y < 0 || bullets[i].y > canvas.height) {
+                    bullets.splice(i, 1);
+                }
+            }
+            
+            // 7. FX
+            for (let i = fx.length - 1; i >= 0; i--) {
+                ctx.fillStyle = fx[i].color; 
+                ctx.beginPath();
+                ctx.arc(fx[i].x, fx[i].y, fx[i].r, 0, Math.PI * 2, false);
+                ctx.fill();
+                fx[i].x += fx[i].xv;
+                fx[i].y += fx[i].yv;
+                fx[i].life--;
+                if (fx[i].life <= 0) fx.splice(i, 1);
+            }
+
+            // 8. Collisions
+            if (!exploding && !ship.dead && ship.blinkNum == 0) {
+                for (let i = roids.length - 1; i >= 0; i--) {
+                    if (distBetweenPoints(ship.x, ship.y, roids[i].x, roids[i].y) < ship.r + roids[i].r) {
+                        explodeShip();
+                        destroyAsteroid(i);
+                        break;
+                    }
+                }
+            }
+
+            for (let i = roids.length - 1; i >= 0; i--) {
+                for (let j = bullets.length - 1; j >= 0; j--) {
+                    if (distBetweenPoints(bullets[j].x, bullets[j].y, roids[i].x, roids[i].y) < roids[i].r) {
+                        bullets.splice(j, 1);
+                        destroyAsteroid(i);
+                        break;
+                    }
+                }
+            }
+
+            // 9. UI & DEMO SCREEN
+            if (!automationOn) {
+                ctx.font = TEXT_SIZE + "px 'Press Start 2P', monospace"; 
+
+                if (textAlpha >= 0) {
+                    ctx.fillStyle = "rgba(0, 255, 255, " + textAlpha + ")"; 
+                    ctx.textAlign = "center";
+                    ctx.fillText(text, canvas.width / 2, canvas.height * 0.75);
+                    textAlpha -= (1.0 / TEXT_FADE_TIME / FPS);
+                } else if (ship.dead) {
+                    automationOn = true;
+                    newGame();
+                }
+
+                // Lives
+                let lifeColour;
+                for(let i = 0; i < lives; i++) {
+                    lifeColour = exploding && i == lives - 1 ? "red" : COLOR_SHIP;
+                    drawShipLife(SHIP_SIZE + i * SHIP_SIZE * 1.2, SHIP_SIZE + 10, 0.5 * Math.PI, lifeColour);
+                }
+
+                // Score
+                ctx.fillStyle = COLOR_TEXT;
+                ctx.textAlign = "right";
+                ctx.fillText(score, canvas.width - SHIP_SIZE / 2, SHIP_SIZE + 10);
+                
+                // High Score
+                ctx.textAlign = "center";
+                ctx.fillText("BEST " + scoreHigh, canvas.width / 2, SHIP_SIZE + 10);
+                
+                // Level
+                ctx.font = (TEXT_SIZE * 0.75) + "px 'Press Start 2P', monospace";
+                ctx.fillText("LVL " + (level + 1), canvas.width / 2, SHIP_SIZE + 45);
+
+            } else {
+                // --- DEMO SCREEN ---
+                
+                // Draw High Score (Top Center) - Same as game mode
+                ctx.fillStyle = COLOR_TEXT;
+                ctx.textAlign = "center";
+                ctx.textBaseline = "alphabetic"; // Reset baseline
+                ctx.font = TEXT_SIZE + "px 'Press Start 2P', monospace";
+                ctx.fillText("BEST " + scoreHigh, canvas.width / 2, SHIP_SIZE + 10);
+
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                
+                // Title
+                ctx.fillStyle = COLOR_TEXT;
+                ctx.font = (TEXT_SIZE + 30) + "px 'Press Start 2P', monospace";
+                ctx.fillText("ASTEROIDS", canvas.width / 2, canvas.height * 0.4);
+
+                // Instruction
+                ctx.font = (TEXT_SIZE - 5) + "px 'Press Start 2P', monospace";
+                ctx.fillStyle = "#ffffff";
+                // Blink instruction
+                if (Math.floor(Date.now() / 500) % 2 === 0) {
+                    ctx.fillText("PRESS SPACE TO PLAY", canvas.width / 2, canvas.height * 0.55);
+                }
+
+                // --- SCORING LEGEND ---
+                const startY = canvas.height * 0.65; 
+                const gapY = 80; 
+                const startX = canvas.width / 2 - 80;
+
+                ctx.font = (TEXT_SIZE - 8) + "px 'Press Start 2P', monospace";
+                ctx.textAlign = "left";
+                
+                for (let i = 0; i < legendRoids.length; i++) {
+                    const r = legendRoids[i].r;
+                    const c = legendRoids[i].color;
+                    const pts = [ROIDS_PTS_LGE, ROIDS_PTS_MED, ROIDS_PTS_SML][i];
+                    
+                    // Draw Rock Shape manually at specific coordinates
+                    ctx.strokeStyle = c;
+                    ctx.lineWidth = SHIP_SIZE / 20;
+                    ctx.beginPath();
+                    const vert = legendRoids[i].vert;
+                    const offs = legendRoids[i].offs;
+                    for (let j = 0; j < vert; j++) {
+                        ctx.lineTo(
+                            startX + r * offs[j] * Math.cos(j * Math.PI * 2 / vert),
+                            (startY + i * gapY) + r * offs[j] * Math.sin(j * Math.PI * 2 / vert)
+                        );
+                    }
+                    ctx.closePath();
+                    ctx.stroke();
+
+                    // Draw Text
+                    ctx.fillStyle = c;
+                    ctx.fillText("= " + pts + " PTS", startX + 80, startY + i * gapY + 8);
+                }
+            }
+        }
+        
+        function drawShipLife(x, y, a, colour = "white") {
+            ctx.strokeStyle = colour;
+            ctx.lineWidth = SHIP_SIZE / 20;
+            ctx.beginPath();
+            ctx.moveTo(
+                x + 4/3 * ship.r * Math.cos(a),
+                y - 4/3 * ship.r * Math.sin(a)
+            );
+            ctx.lineTo(
+                x - ship.r * (2/3 * Math.cos(a) + Math.sin(a)),
+                y + ship.r * (2/3 * Math.sin(a) - Math.cos(a))
+            );
+            ctx.lineTo(
+                x - ship.r * (2/3 * Math.cos(a) - Math.sin(a)),
+                y + ship.r * (2/3 * Math.sin(a) + Math.cos(a))
+            );
+            ctx.closePath();
+            ctx.stroke();
+        }
+    </script>
+</body>
+</html>
